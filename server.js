@@ -42,7 +42,11 @@ require('dotenv').config();         // lee el archivo .env (solo en desarrollo l
 // se configura en el panel del servicio. Así el secreto nunca se sube a GitHub.
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Supabase exige conexión cifrada (SSL)
+  ssl: { rejectUnauthorized: false },
+  min: 2,                 // mantiene al menos 2 conexiones abiertas y listas
+  max: 10,                // límite de conexiones simultáneas hacia Supabase
+  idleTimeoutMillis: 30000,      // no cierra conexiones ociosas demasiado rápido
+  connectionTimeoutMillis: 5000, // falla rápido si no logra conectar, en vez de colgarse
 });
 
 // --- Crear la aplicación web ------------------------------------------------
