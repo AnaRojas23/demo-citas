@@ -8,6 +8,24 @@
 //   4. Responder al cliente con datos en formato JSON.
 //
 // El cliente (public/index.html) nunca toca la base de datos: solo pide.
+//
+// OPTIMIZACIÓN APLICADA en POST /api/citas:
+//   Antes: 2 consultas SQL (SELECT para chequear choque de horario + INSERT).
+//          Este patrón "verificar y luego insertar" (check-then-act) tiene una
+//          condición de carrera: si dos peticiones llegan casi al mismo tiempo,
+//          ambas pueden pasar el SELECT antes de que cualquiera haga el INSERT,
+//          y terminan creándose dos citas para el mismo profesional y horario.
+//   Después: 1 sola consulta SQL (INSERT directo). La regla de unicidad ya no
+//          vive en JavaScript: vive en un índice único de la base de datos
+//          (ver migración abajo). Si dos peticiones compiten, Postgres solo
+//          deja pasar una y rechaza la otra con el código de error 23505.
+//          Esto es atómico por construcción: no hay ventana de tiempo posible
+//          para que se cuelen dos citas duplicadas.
+//
+// MIGRACIÓN NECESARIA (ejecutar una sola vez en Supabase, SQL Editor):
+//
+//   CREATE UNIQUE INDEX idx_cita_unica ON citas (profesional_id, fecha_hora);
+//
 // ============================================================================
 
 // --- Importar librerías -----------------------------------------------------
@@ -32,7 +50,7 @@ const app = express();
 app.use(cors());            // habilita CORS: el cliente puede vivir en otro dominio
 app.use(express.json());    // permite leer el JSON que envían los clientes en POST
 // sirve el cliente web y resuelve /nombre como /nombre.html automáticamente
-app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] })); 
+app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
 
 // ============================================================================
 // ENDPOINTS: las "operaciones" que el servidor expone a los clientes.
@@ -100,16 +118,11 @@ app.post('/api/citas', async (req, res) => {
   }
 
   try {
-    // Regla 3: el profesional no puede tener dos citas a la misma hora.
-    const ocupado = await pool.query(
-      'SELECT id FROM citas WHERE profesional_id = $1 AND fecha_hora = $2',
-      [profesional_id, fecha_hora]
-    );
-    if (ocupado.rows.length > 0) {
-      return res.status(409).json({ error: 'Regla del servidor: ese profesional ya tiene una cita a esa hora' });
-    }
-
-    // Si todas las reglas pasan, se guarda en la base de datos.
+    // Regla 3 (choque de horario): YA NO se verifica con un SELECT previo.
+    // Se intenta insertar directamente. El índice único de la base de datos
+    // (idx_cita_unica sobre profesional_id + fecha_hora) es quien garantiza
+    // que no puedan coexistir dos citas para el mismo profesional a la misma
+    // hora, incluso si dos peticiones llegan exactamente al mismo tiempo.
     const insercion = await pool.query(
       `INSERT INTO citas (paciente, profesional_id, fecha_hora)
        VALUES ($1, $2, $3) RETURNING id`,
@@ -117,6 +130,11 @@ app.post('/api/citas', async (req, res) => {
     );
     res.status(201).json({ mensaje: 'Cita creada', id: insercion.rows[0].id });
   } catch (error) {
+    // Código 23505 = Postgres detectó una violación de restricción UNIQUE.
+    // Es la traducción, a nivel de base de datos, de la antigua Regla 3.
+    if (error.code === '23505') {
+      return res.status(409).json({ error: 'Regla del servidor: ese profesional ya tiene una cita a esa hora' });
+    }
     console.error('Error creando cita:', error.message);
     res.status(500).json({ error: 'No se pudo guardar en la base de datos' });
   }
